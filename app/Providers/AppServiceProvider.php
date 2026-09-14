@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use Illuminate\Support\ServiceProvider;
+use Illuminate\Support\Facades\URL; // 1. Idugang kini sa taas
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -23,6 +24,9 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot()
     {
-        //
+        // 2. Idugang kini aron ma-force ang HTTPS sa Render
+        if (config('app.env') === 'production') {
+            URL::forceScheme('https');
+        }
     }
 }
