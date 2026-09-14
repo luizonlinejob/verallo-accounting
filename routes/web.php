@@ -137,6 +137,15 @@ Route::middleware(['auth'])->group(function () {
     Route::put('/fees/{id}', [FeeController::class, 'update']);
     Route::put('/api/fees/{id}', [FeeController::class, 'update']);
 
+    Route::get('/students/{studentId}/fees', [FeeController::class, 'getStudentFees']);
+    Route::get('/api/students/{studentId}/fees', [FeeController::class, 'getStudentFees']);
+
+    Route::post('/students/{studentId}/fees', [FeeController::class, 'store']);
+    Route::post('/api/students/{studentId}/fees', [FeeController::class, 'store']);
+
+    Route::delete('/fees/{id}', [FeeController::class, 'destroy']);
+    Route::delete('/api/fees/{id}', [FeeController::class, 'destroy']);
+
     // ==========================================================================
     // Users
     // ==========================================================================
@@ -148,32 +157,55 @@ Route::middleware(['auth'])->group(function () {
     Route::put('/api/users/{user}/role', [UserController::class, 'updateRole']);
     Route::delete('/users/{user}', [UserController::class, 'destroy']);
     Route::delete('/api/users/{user}', [UserController::class, 'destroy']);
+});
 
+// ==========================================================================
+// TEMPORARY MIGRATION ROUTES - ALISIN PAGKATAPOS GAMITIN!
+// ==========================================================================
 
-    // ==========================================================================
-    // Fees
-    // ==========================================================================
-    Route::get('/students/{studentId}/fees', [FeeController::class, 'getStudentFees']);
-    Route::get('/api/students/{studentId}/fees', [FeeController::class, 'getStudentFees']);
+// Route para mag-run ng migrations at seeder
+Route::get('/run-migrations-secret-12345', function () {
+    try {
+        // Run migrations
+        \Artisan::call('migrate', ['--force' => true]);
+        $migrateOutput = \Artisan::output();
 
-    Route::post('/students/{studentId}/fees', [FeeController::class, 'store']);
-    Route::post('/api/students/{studentId}/fees', [FeeController::class, 'store']);
+        // Try seeding (optional)
+        $seedOutput = '';
+        try {
+            \Artisan::call('db:seed', ['--force' => true]);
+            $seedOutput = \Artisan::output();
+        } catch (\Exception $e) {
+            $seedOutput = 'Seeder skipped or error: ' . $e->getMessage();
+        }
 
-    Route::put('/fees/{id}', [FeeController::class, 'update']);
-    Route::put('/api/fees/{id}', [FeeController::class, 'update']);
+        return '<h2>✅ Migrations Completed!</h2>' .
+               '<h3>Migration Output:</h3>' .
+               '<pre>' . htmlspecialchars($migrateOutput) . '</pre>' .
+               '<h3>Seeder Output:</h3>' .
+               '<pre>' . htmlspecialchars($seedOutput) . '</pre>' .
+               '<hr>' .
+               '<p style="color:red;font-weight:bold;">⚠️ ALISIN AGAD ANG ROUTE NA ITO SA routes/web.php PAGKATAPOS GAMITIN!</p>';
+    } catch (\Exception $e) {
+        return '<h2>❌ Error:</h2>' .
+               '<pre>' . htmlspecialchars($e->getMessage()) . '</pre>' .
+               '<h3>Trace:</h3>' .
+               '<pre>' . htmlspecialchars($e->getTraceAsString()) . '</pre>';
+    }
+});
 
-    Route::delete('/fees/{id}', [FeeController::class, 'destroy']);
-    Route::delete('/api/fees/{id}', [FeeController::class, 'destroy']);
+// Route para i-check kung anong tables ang existing sa database
+Route::get('/check-tables-secret-12345', function () {
+    try {
+        $tables = \DB::select("SELECT tablename FROM pg_tables WHERE schemaname = 'public'");
+        $list = array_map(fn($t) => $t->tablename, $tables);
 
-    // ==========================================================================
-   // Users
-  // ==========================================================================
-    Route::get('/users', [UserController::class, 'index']);
-    Route::get('/api/users', [UserController::class, 'index']);
-    Route::post('/users', [UserController::class, 'store']);
-    Route::post('/api/users', [UserController::class, 'store']);
-    Route::put('/users/{user}/role', [UserController::class, 'updateRole']);
-    Route::put('/api/users/{user}/role', [UserController::class, 'updateRole']);
-    Route::delete('/users/{user}', [UserController::class, 'destroy']);
-    Route::delete('/api/users/{user}', [UserController::class, 'destroy']);
+        return '<h3>Existing Tables (' . count($list) . '):</h3>' .
+               '<pre>' . print_r($list, true) . '</pre>' .
+               '<hr>' .
+               '<p style="color:red;font-weight:bold;">⚠️ ALISIN AGAD ANG ROUTE NA ITO PAGKATAPOS GAMITIN!</p>';
+    } catch (\Exception $e) {
+        return '<h2>❌ Error:</h2>' .
+               '<pre>' . htmlspecialchars($e->getMessage()) . '</pre>';
+    }
 });
