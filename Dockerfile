@@ -1,6 +1,6 @@
 FROM php:8.2-cli
 
-# Install system dependencies & Node.js/npm for Vite build
+# Install system dependencies & Node.js
 RUN apt-get update && apt-get install -y \
     git \
     curl \
@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y \
 # Clear cache
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install PHP extensions
+# Install PHP extensions for MySQL
 RUN docker-php-ext-install pdo pdo_mysql mbstring zip
 
 # Get latest Composer
