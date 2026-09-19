@@ -1,6 +1,6 @@
 FROM php:8.2-cli
 
-# Install system dependencies
+# Install system dependencies & Node.js/npm for Vite build
 RUN apt-get update && apt-get install -y \
     git \
     curl \
@@ -9,12 +9,14 @@ RUN apt-get update && apt-get install -y \
     libxml2-dev \
     zip \
     unzip \
-    libzip-dev
+    libzip-dev \
+    nodejs \
+    npm
 
 # Clear cache
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install PHP extensions needed for Laravel & Hostinger MySQL
+# Install PHP extensions
 RUN docker-php-ext-install pdo pdo_mysql mbstring zip
 
 # Get latest Composer
@@ -28,6 +30,10 @@ COPY . .
 
 # Install PHP dependencies
 RUN composer install --no-dev --optimize-autoloader
+
+# Install Node modules & build Vite assets
+RUN npm install
+RUN npm run build
 
 EXPOSE 10000
 
