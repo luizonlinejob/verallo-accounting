@@ -2,137 +2,120 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Course;
-use Illuminate\Http\Request;
-use Illuminate\Validation\Rule;
+use App\Models\Student;
+use App\Models\Payment;
+use App\Models\User;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Cache;
 
-class CourseController extends Controller
+class DashboardController extends Controller
 {
     /**
-     * 📋 List all courses
+     * 📊 Get dashboard statistics (with caching)
      */
-    public function index()
+    public function stats()
     {
-        $courses = Course::orderBy('name')->get();
-
-        return response()->json([
-            'success' => true,
-            'courses' => $courses,
-        ], 200);
-    }
-
-    /**
-     * ➕ Create new course (Superadmin only)
-     */
-    public function store(Request $request)
-    {
-        $user = auth()->user();
-        if (!$user || strtolower($user->role ?? '') !== 'superadmin') {
-            return response()->json([
-                'success' => false,
-                'message' => 'Only Superadmin can manage courses.',
-            ], 403);
-        }
-
-        $request->validate([
-            'name'        => 'required|string|max:255|unique:courses,name',
-            'code'        => 'nullable|string|max:50',
-            'description' => 'nullable|string|max:500',
-        ]);
-
         try {
-            $course = Course::create([
-                'name'        => $request->name,
-                'code'        => $request->code,
-                'description' => $request->description,
-                'is_active'   => true,
-            ]);
+            $user = auth()->user();
+            $isEncoder = strtolower($user->role ?? '') === 'encoder';
+
+            // ✅ Cache key per user (encoder) or shared (admin)
+            $cacheKey = $isEncoder
+                ? "dashboard_stats_encoder_{$user->id}"
+                : 'dashboard_stats_admin';
+
+            $cacheDuration = 60; // 60 seconds
+
+            $stats = Cache::remember($cacheKey, $cacheDuration, function () use ($user, $isEncoder) {
+                // ===== BASIC STATS =====
+                $totalStudents = Student::count();
+                $archivedStudents = Student::onlyTrashed()->count();
+
+                // ===== PENDING / APPROVED / REJECTED =====
+                $pendingQuery = Payment::where('status', 'pending');
+                $approvedQuery = Payment::where('status', 'approved');
+                $rejectedQuery = Payment::where('status', 'rejected');
+
+                if ($isEncoder) {
+                    $pendingQuery->where('encoded_by', $user->id);
+                    $approvedQuery->where('encoded_by', $user->id);
+                    $rejectedQuery->where('encoded_by', $user->id);
+                }
+
+                $pendingPayments  = $pendingQuery->count();
+                $approvedPayments = $approvedQuery->count();
+                $rejectedPayments = $rejectedQuery->count();
+
+                // ===== FINANCIAL TOTALS =====
+                $totalCollection = (float) Payment::where('status', 'approved')->sum('amount_paid');
+                $pendingAmount   = (float) Payment::where('status', 'pending')->sum('amount_paid');
+
+                $totalFees = (float) DB::table('student_fees')->sum('amount');
+                $totalOutstanding = max(0, $totalFees - $totalCollection);
+
+                // ===== USERS =====
+                $totalUsers = User::count();
+
+                // ===== ENCODER-SPECIFIC =====
+                $myEncodedToday = 0;
+                $myPending = 0;
+                $myRejected = 0;
+
+                if ($isEncoder) {
+                    $myEncodedToday = Payment::where('encoded_by', $user->id)
+                        ->whereDate('created_at', today())
+                        ->count();
+
+                    $myPending = Payment::where('encoded_by', $user->id)
+                        ->where('status', 'pending')
+                        ->count();
+
+                    $myRejected = Payment::where('encoded_by', $user->id)
+                        ->where('status', 'rejected')
+                        ->count();
+                }
+
+                return [
+                    'total_students'    => $totalStudents,
+                    'archived_students' => $archivedStudents,
+                    'pending_payments'  => $pendingPayments,
+                    'approved_payments' => $approvedPayments,
+                    'rejected_payments' => $rejectedPayments,
+                    'total_collection'  => $isEncoder ? 0 : $totalCollection,
+                    'pending_amount'    => $isEncoder ? 0 : $pendingAmount,
+                    'total_outstanding' => $isEncoder ? 0 : $totalOutstanding,
+                    'total_users'       => $totalUsers,
+                    'my_encoded_today'  => $myEncodedToday,
+                    'my_pending'        => $myPending,
+                    'my_rejected'       => $myRejected,
+                ];
+            });
 
             return response()->json([
                 'success' => true,
-                'message' => 'Course added successfully!',
-                'course'  => $course,
-            ], 201);
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Failed to add course: ' . $e->getMessage(),
-            ], 500);
-        }
-    }
-
-    /**
-     * ✏️ Update course (Superadmin only)
-     */
-    public function update(Request $request, $id)
-    {
-        $user = auth()->user();
-        if (!$user || strtolower($user->role ?? '') !== 'superadmin') {
-            return response()->json([
-                'success' => false,
-                'message' => 'Only Superadmin can manage courses.',
-            ], 403);
-        }
-
-        $request->validate([
-            'name'        => ['required', 'string', 'max:255', Rule::unique('courses', 'name')->ignore($id)],
-            'code'        => 'nullable|string|max:50',
-            'description' => 'nullable|string|max:500',
-            'is_active'   => 'nullable|boolean',
-        ]);
-
-        try {
-            $course = Course::findOrFail($id);
-
-            $course->update([
-                'name'        => $request->name,
-                'code'        => $request->code,
-                'description' => $request->description,
-                'is_active'   => $request->is_active ?? $course->is_active,
-            ]);
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Course updated successfully!',
-                'course'  => $course,
+                'stats'   => $stats,
             ], 200);
 
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
-                'message' => 'Failed to update course: ' . $e->getMessage(),
+                'message' => 'Error fetching stats: ' . $e->getMessage(),
             ], 500);
         }
     }
 
     /**
-     * 🗑️ Delete course (Superadmin only)
+     * ✅ Clear cache on data changes
+     * Call this from approve/reject/store/archive methods
      */
-    public function destroy($id)
+    public static function clearCache()
     {
-        $user = auth()->user();
-        if (!$user || strtolower($user->role ?? '') !== 'superadmin') {
-            return response()->json([
-                'success' => false,
-                'message' => 'Only Superadmin can manage courses.',
-            ], 403);
-        }
+        Cache::forget('dashboard_stats_admin');
 
-        try {
-            $course = Course::findOrFail($id);
-            $course->delete();
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Course deleted successfully!',
-            ], 200);
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Failed to delete course: ' . $e->getMessage(),
-            ], 500);
+        // Clear encoder caches
+        $encoderIds = User::where('role', 'encoder')->pluck('id');
+        foreach ($encoderIds as $id) {
+            Cache::forget("dashboard_stats_encoder_{$id}");
         }
     }
 }

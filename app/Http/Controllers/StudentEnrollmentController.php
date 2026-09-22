@@ -8,11 +8,23 @@ use App\Models\CustomField;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 
 class StudentEnrollmentController extends Controller
 {
+    /**
+     * ✅ Clear student caches
+     */
+    private function clearCaches()
+    {
+        Cache::forget('students_json_all');
+        Cache::forget('students_json_archived');
+        Cache::flush();
+        DashboardController::clearCache();
+    }
+
     public function index()
     {
         $students = Student::with(['fees', 'payments'])->latest()->get();
@@ -23,7 +35,7 @@ class StudentEnrollmentController extends Controller
     }
 
     /**
-     * 🔧 Transform a student into the shape the Vue component expects.
+     * 🔧 Transform a student (no additional queries if eager-loaded)
      */
     private function transformStudent($student)
     {
@@ -46,7 +58,7 @@ class StudentEnrollmentController extends Controller
                 ->first()
             : null;
 
-        $lastApprovedPayment = $approvedPayments->sortByDesc('created_at')->first();
+        $lastApprovedPayment = $approvedPayments->sortByDesc('approved_at')->first();
 
         $student->total_fees    = (float) $totalFees;
         $student->total_paid    = (float) $totalPaid;
@@ -61,8 +73,8 @@ class StudentEnrollmentController extends Controller
         $student->last_paid_date = $lastApprovedPayment && $lastApprovedPayment->created_at
             ? $lastApprovedPayment->created_at->format('M d, Y - g:i A')
             : null;
-        $student->approved_at = $lastApprovedPayment && $lastApprovedPayment->created_at
-            ? $lastApprovedPayment->created_at->toIso8601String()
+        $student->approved_at = $lastApprovedPayment && $lastApprovedPayment->approved_at
+            ? $lastApprovedPayment->approved_at->toIso8601String()
             : null;
 
         $student->is_rejected       = $rejectedPayment ? true : false;
@@ -76,15 +88,22 @@ class StudentEnrollmentController extends Controller
     }
 
     /**
-     * 📋 JSON: Active Students list
+     * 📋 JSON: Active Students list (with caching + N+1 fix)
      */
     public function getStudentsJson()
     {
         try {
-            $students = Student::with(['fees', 'payments'])
+            // ✅ Cache 60 seconds
+            $students = Cache::remember('students_json_all', 60, function () {
+                return Student::with([
+                    'fees:id,student_id,fee_name,amount',
+                    'payments:id,student_id,amount_paid,status,created_at,approved_at,rejected_at,rejection_reason'
+                ])
+                ->select('id', 'student_id', 'full_name', 'email', 'course', 'year_level', 'semester', 'created_at')
                 ->latest()
                 ->get()
                 ->map(fn($s) => $this->transformStudent($s));
+            });
 
             return response()->json($students, 200);
 
@@ -97,10 +116,11 @@ class StudentEnrollmentController extends Controller
     }
 
     // ===== CUSTOM FIELDS =====
-
     public function getCustomFields()
     {
-        return response()->json(CustomField::all());
+        return Cache::remember('custom_fields_all', 300, function () {
+            return CustomField::all();
+        });
     }
 
     public function addCustomField(Request $request)
@@ -114,20 +134,21 @@ class StudentEnrollmentController extends Controller
             'field_type'  => 'text',
         ]);
 
+        Cache::forget('custom_fields_all');
+
         return response()->json([
             'message' => 'Custom field successfully added!',
             'field'   => $field
         ]);
     }
 
-    /**
-     * 🗑️ DELETE a custom field
-     */
     public function removeCustomField($id)
     {
         try {
             $field = CustomField::findOrFail($id);
             $field->delete();
+
+            Cache::forget('custom_fields_all');
 
             return response()->json([
                 'success' => true,
@@ -142,8 +163,9 @@ class StudentEnrollmentController extends Controller
         }
     }
 
-    // ===== ENROLL =====
-
+    /**
+     * 📝 Enroll new student (batch insert + cache clear)
+     */
     public function enroll(Request $request)
     {
         $request->validate([
@@ -170,17 +192,24 @@ class StudentEnrollmentController extends Controller
                 'custom_values' => $request->custom_values ?? [],
             ]);
 
-            foreach ($request->fees as $fee) {
-                StudentFee::create([
-                    'student_id' => $student->id,
-                    'fee_name'   => $fee['fee_name'],
-                    'amount'     => $fee['amount'],
-                    'semester'   => $request->semester ?? '1st Semester',
-                    'status'     => 'unpaid',
-                ]);
-            }
+            // ✅ Batch insert fees (1 query instead of N)
+            $now = now();
+            $feesData = collect($request->fees)->map(fn($fee) => [
+                'student_id' => $student->id,
+                'fee_name'   => $fee['fee_name'],
+                'amount'     => $fee['amount'],
+                'semester'   => $request->semester ?? '1st Semester',
+                'status'     => 'unpaid',
+                'created_at' => $now,
+                'updated_at' => $now,
+            ])->toArray();
+
+            StudentFee::insert($feesData);
 
             DB::commit();
+
+            // ✅ Clear caches
+            $this->clearCaches();
 
             return response()->json([
                 'status'  => 'success',
@@ -196,6 +225,9 @@ class StudentEnrollmentController extends Controller
         }
     }
 
+    /**
+     * ✏️ Update student
+     */
     public function update(Request $request, $id)
     {
         $request->validate([
@@ -220,6 +252,8 @@ class StudentEnrollmentController extends Controller
                 'year_level' => $request->year_level,
             ]);
 
+            $this->clearCaches();
+
             return response()->json([
                 'success' => true,
                 'status'  => 'success',
@@ -237,7 +271,7 @@ class StudentEnrollmentController extends Controller
     }
 
     /**
-     * 📦 ARCHIVE STUDENT (SoftDeletes)
+     * 📦 Archive student
      */
     public function archive($id)
     {
@@ -247,6 +281,8 @@ class StudentEnrollmentController extends Controller
                 ->firstOrFail();
 
             $student->delete();
+
+            $this->clearCaches();
 
             return response()->json([
                 'success' => true,
@@ -264,16 +300,22 @@ class StudentEnrollmentController extends Controller
     }
 
     /**
-     * 📁 GET ARCHIVED STUDENTS
+     * 📁 GET ARCHIVED STUDENTS (with caching)
      */
     public function getArchivedStudents()
     {
         try {
-            $archivedStudents = Student::onlyTrashed()
-                ->with(['fees', 'payments'])
-                ->latest('deleted_at')
-                ->get()
-                ->map(fn($s) => $this->transformStudent($s));
+            $archivedStudents = Cache::remember('students_json_archived', 60, function () {
+                return Student::onlyTrashed()
+                    ->with([
+                        'fees:id,student_id,fee_name,amount',
+                        'payments:id,student_id,amount_paid,status,created_at,approved_at,rejected_at,rejection_reason'
+                    ])
+                    ->select('id', 'student_id', 'full_name', 'email', 'course', 'year_level', 'semester', 'deleted_at')
+                    ->latest('deleted_at')
+                    ->get()
+                    ->map(fn($s) => $this->transformStudent($s));
+            });
 
             return response()->json([
                 'success'  => true,
@@ -293,7 +335,7 @@ class StudentEnrollmentController extends Controller
     }
 
     /**
-     * ♻️ RESTORE ARCHIVED STUDENT
+     * ♻️ Restore archived student
      */
     public function restore($id)
     {
@@ -304,6 +346,8 @@ class StudentEnrollmentController extends Controller
                 ->firstOrFail();
 
             $student->restore();
+
+            $this->clearCaches();
 
             return response()->json([
                 'success' => true,
@@ -321,7 +365,7 @@ class StudentEnrollmentController extends Controller
     }
 
     /**
-     * 🗑️ PERMANENT DELETE
+     * 🗑️ Permanently delete student
      */
     public function forceDelete($id)
     {
@@ -345,6 +389,8 @@ class StudentEnrollmentController extends Controller
             $student->forceDelete();
 
             DB::commit();
+
+            $this->clearCaches();
 
             return response()->json([
                 'success' => true,
