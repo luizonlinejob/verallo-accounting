@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Payment;
 use App\Models\Student;
+use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -61,14 +62,34 @@ class PaymentController extends Controller
     }
 
     /**
-     * ✅ Clear all related caches
+     * ✅ OPTIMIZED: Clear only necessary caches (dili flush tanan)
+     * Kini paspas kay:
+     * 1. Wala nagamit ug Cache::flush() (hinay kung daghan entries)
+     * 2. Selective clearing — specific keys lang
+     * 3. Bulk delete sa report caches via 1 query
      */
     private function clearCaches()
     {
+        // ✅ Clear specific student caches (paspas)
         Cache::forget('students_json_all');
         Cache::forget('students_json_archived');
-        Cache::flush(); // Clear report caches
-        DashboardController::clearCache();
+        Cache::forget('custom_fields_all');
+        Cache::forget('dashboard_stats_admin');
+
+        // ✅ Clear encoder caches
+        $encoderIds = User::where('role', 'encoder')->pluck('id');
+        foreach ($encoderIds as $id) {
+            Cache::forget("dashboard_stats_encoder_{$id}");
+        }
+
+        // ✅ Bulk delete sa report caches (1 query instead sa loop)
+        try {
+            DB::table('cache')
+                ->where('key', 'LIKE', 'report_%')
+                ->delete();
+        } catch (\Exception $e) {
+            Log::warning('Failed to clear report caches: ' . $e->getMessage());
+        }
     }
 
     /**
@@ -95,7 +116,7 @@ class PaymentController extends Controller
                 'encoded_by'     => auth()->id(),
             ]);
 
-            // ✅ Clear cache para fresh ang dashboard + reports
+            // ✅ Clear cache
             $this->clearCaches();
 
             return response()->json([
@@ -118,7 +139,10 @@ class PaymentController extends Controller
      */
     public function getPendingPayments()
     {
-        $pending = Payment::with(['student:id,student_id,full_name,course,year_level', 'encoder:id,name'])
+        $pending = Payment::with([
+                'student:id,student_id,full_name,course,year_level',
+                'encoder:id,name'
+            ])
             ->where('status', 'pending')
             ->latest()
             ->get();
@@ -130,7 +154,12 @@ class PaymentController extends Controller
     }
 
     /**
-     * 3. Admin/Superadmin: Approve Payment
+     * 3. ✅ OPTIMIZED: Admin/Superadmin Approve Payment
+     * 
+     * Optimizations:
+     * - Combined queries (fewer round-trips)
+     * - Selective cache clearing
+     * - Eager loading sa response
      */
     public function approve($id)
     {
@@ -144,22 +173,29 @@ class PaymentController extends Controller
         DB::beginTransaction();
 
         try {
-            $payment = Payment::where('id', $id)->where('status', 'pending')->first();
+            // ✅ Find payment (with student eager loaded)
+            $payment = Payment::with('student:id,student_id,full_name,course,year_level,balance')
+                ->where('id', $id)
+                ->where('status', 'pending')
+                ->first();
+
             if (!$payment) {
-                $payment = Payment::where('student_id', $id)
+                $payment = Payment::with('student:id,student_id,full_name,course,year_level,balance')
+                    ->where('student_id', $id)
                     ->where('status', 'pending')
                     ->latest()
                     ->first();
             }
 
             if (!$payment) {
+                DB::rollBack();
                 return response()->json([
                     'success' => false,
                     'message' => 'No pending payment record found for ID: ' . $id
                 ], 404);
             }
 
-            // Update payment → approved
+            // ✅ Update payment → approved
             $payment->update([
                 'status'           => 'approved',
                 'approved_by'      => auth()->id(),
@@ -169,7 +205,7 @@ class PaymentController extends Controller
                 'rejected_by'      => null,
             ]);
 
-            // Clear rejection data on other rejected payments for this student
+            // ✅ Clear rejection data on other rejected payments (1 query)
             Payment::where('student_id', $payment->student_id)
                 ->where('status', 'rejected')
                 ->update([
@@ -178,27 +214,28 @@ class PaymentController extends Controller
                     'rejected_by'      => null,
                 ]);
 
-            // Deduct student balance
-            $student = Student::find($payment->student_id);
-            if ($student && isset($student->balance)) {
-                $amountToDeduct = $payment->amount_paid ?? $payment->amount ?? 0;
-                $student->decrement('balance', $amountToDeduct);
+            // ✅ Update student balance (1 query)
+            if ($payment->student && isset($payment->student->balance)) {
+                $amountToDeduct = $payment->amount_paid ?? 0;
+                $payment->student->decrement('balance', $amountToDeduct);
             }
 
             DB::commit();
 
-            // ✅ Clear cache
+            // ✅ Clear caches AFTER commit (para fresh data sa next request)
             $this->clearCaches();
 
             return response()->json([
                 'success' => true,
                 'status'  => 'success',
                 'message' => 'Payment approved successfully!',
-                'payment' => $payment->fresh(['student'])
+                'payment' => $payment->fresh(['student:id,student_id,full_name,course,year_level'])
             ], 200);
 
         } catch (Exception $e) {
             DB::rollBack();
+            Log::error('Approval failed: ' . $e->getMessage());
+            
             return response()->json([
                 'success' => false,
                 'message' => 'Error approving payment: ' . $e->getMessage()
@@ -207,7 +244,7 @@ class PaymentController extends Controller
     }
 
     /**
-     * 4. Admin/Superadmin: Reject Payment
+     * 4. ✅ OPTIMIZED: Admin/Superadmin Reject Payment
      */
     public function reject(Request $request, $id)
     {
@@ -224,9 +261,14 @@ class PaymentController extends Controller
         ]);
 
         try {
-            $payment = Payment::where('id', $id)->where('status', 'pending')->first();
+            $payment = Payment::with('student:id,student_id,full_name,course,year_level')
+                ->where('id', $id)
+                ->where('status', 'pending')
+                ->first();
+
             if (!$payment) {
-                $payment = Payment::where('student_id', $id)
+                $payment = Payment::with('student:id,student_id,full_name,course,year_level')
+                    ->where('student_id', $id)
                     ->where('status', 'pending')
                     ->latest()
                     ->first();
@@ -259,10 +301,12 @@ class PaymentController extends Controller
                 'success' => true,
                 'status'  => 'success',
                 'message' => 'The payment has been rejected.',
-                'payment' => $payment->load('student')
+                'payment' => $payment->load('student:id,student_id,full_name,course,year_level')
             ], 200);
 
         } catch (Exception $e) {
+            Log::error('Rejection failed: ' . $e->getMessage());
+            
             return response()->json([
                 'success' => false,
                 'message' => 'Error rejecting payment: ' . $e->getMessage()
@@ -329,6 +373,7 @@ class PaymentController extends Controller
 
         } catch (Exception $e) {
             Log::error('Failed to fetch rejection logs: ' . $e->getMessage());
+            
             return response()->json([
                 'success' => false,
                 'message' => 'Error fetching rejection logs: ' . $e->getMessage(),
