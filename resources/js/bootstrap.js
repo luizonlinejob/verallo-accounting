@@ -12,6 +12,12 @@ window.axios = axios;
 
 window.axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest';
 
+// ✅ IMPORTANTE: Send session cookies with every request
+window.axios.defaults.withCredentials = true;
+
+// ✅ IMPORTANTE: Send CSRF token from cookie
+window.axios.defaults.withXSRFToken = true;
+
 /**
  * Echo exposes an expressive API for subscribing to channels and listening
  * for events that are broadcast by Laravel. Echo and event broadcasting
