@@ -35,7 +35,7 @@
       </div>
     </div>
 
-    <!-- 🆕 SUCCESS NOTIFICATION (TOP, VERY VISIBLE) -->
+    <!-- SUCCESS NOTIFICATION (TOP, VERY VISIBLE) -->
     <Transition name="slide-down">
       <div
         v-if="successMsg"
@@ -52,7 +52,6 @@
           <p class="font-bold text-lg tracking-tight">Enrollment Successful!</p>
           <p class="text-sm text-emerald-50 mt-1">{{ successMsg }}</p>
 
-          <!-- Student Info Summary -->
           <div v-if="lastEnrolled" class="mt-3 flex flex-wrap items-center gap-2 text-xs">
             <span class="px-2.5 py-1 rounded-full bg-white/20 backdrop-blur-sm font-bold">
               🎓 {{ lastEnrolled.full_name }}
@@ -87,7 +86,6 @@
 
     <!-- ENROLLMENT FORM -->
     <div class="bg-white rounded-2xl shadow-sm border border-slate-200/80 overflow-hidden">
-      <!-- Header strip -->
       <div class="px-6 py-5 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-white">
         <div class="flex items-center gap-3">
           <div class="p-2 bg-gradient-to-br from-blue-500 to-blue-700 text-white rounded-xl text-lg shadow-md shadow-blue-500/20">
@@ -102,7 +100,6 @@
 
       <form @submit.prevent="submitEnrollment" class="p-6 space-y-6">
 
-        <!-- Basic Student Info Fields -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
           <div>
             <label class="block text-xs font-bold text-gray-600 uppercase tracking-wider mb-1.5">Student ID</label>
@@ -137,7 +134,6 @@
             />
           </div>
 
-          <!-- COURSE DROPDOWN -->
           <div>
             <label class="block text-xs font-bold text-gray-600 uppercase tracking-wider mb-1.5">Course</label>
             <select
@@ -146,22 +142,14 @@
               class="w-full border border-slate-300 px-3.5 py-2.5 rounded-xl bg-white text-sm focus:ring-2 focus:ring-blue-600 focus:border-blue-600 focus:outline-none transition-all shadow-sm"
             >
               <option value="" disabled>-- Select Course --</option>
-
               <optgroup label="🎓 Undergraduate Programs">
                 <option v-for="c in undergraduateCourses" :key="c.value" :value="c.value">
-                  {{ c.label }}
-                </option>
-              </optgroup>
-
-              <optgroup label="🎓 Masteral Programs">
-                <option v-for="c in masteralCourses" :key="c.value" :value="c.value">
                   {{ c.label }}
                 </option>
               </optgroup>
             </select>
           </div>
 
-          <!-- YEAR LEVEL SELECTOR -->
           <div>
             <label class="block text-xs font-bold text-gray-600 uppercase tracking-wider mb-1.5">Year Level</label>
             <select
@@ -177,7 +165,6 @@
             </select>
           </div>
 
-          <!-- DYNAMIC CUSTOM FIELDS -->
           <div v-for="(field, index) in customFields" :key="field.id || index" class="relative">
             <div class="flex justify-between items-center mb-1.5">
               <label class="block text-xs font-bold text-gray-600 uppercase tracking-wider">{{ field.field_label }}</label>
@@ -287,7 +274,6 @@
           </div>
         </div>
 
-        <!-- SUBMIT BUTTON -->
         <button
           type="submit"
           :disabled="loading"
@@ -313,6 +299,9 @@ const props = defineProps({
   }
 });
 
+// ✅ Emit events para sa parent (MainApp)
+const emit = defineEmits(['enrolled']);
+
 // 🎓 UNDERGRADUATE PROGRAMS
 const undergraduateCourses = [
   { value: 'BSTM (Bachelor of Science in Tourism Management)',      label: 'BSTM (Bachelor of Science in Tourism Management)' },
@@ -325,17 +314,12 @@ const undergraduateCourses = [
   { value: 'BSM (Bachelor of Science in Midwifery)',                 label: 'BSM (Bachelor of Science in Midwifery)' },
 ];
 
-// 🎓 MASTERAL PROGRAMS
-const masteralCourses = [
-  { value: 'MAED (Master of Arts in Education)',                      label: 'MAED (Master of Arts in Education)' },
-];
-
 const customFields = ref([]);
 const newFieldLabel = ref('');
 const fieldError = ref('');
 const loading = ref(false);
 const successMsg = ref('');
-const lastEnrolled = ref(null);   // 🆕 Last enrolled student info
+const lastEnrolled = ref(null);
 
 const form = reactive({
   student_id: '',
@@ -429,13 +413,12 @@ const fetchCustomFields = async () => {
   }
 };
 
-// 🆕 Submit Enrollment Event
+// ✅ Submit Enrollment Event
 const submitEnrollment = async () => {
   loading.value = true;
   successMsg.value = '';
   lastEnrolled.value = null;
 
-  // Save current form data before reset
   const currentForm = {
     full_name: form.full_name,
     student_id: form.student_id,
@@ -450,6 +433,9 @@ const submitEnrollment = async () => {
     successMsg.value = res.data?.message || 'Student successfully enrolled!';
     lastEnrolled.value = currentForm;
 
+    // ✅ AUTO-EMIT: Refresh students list sa parent (MainApp)
+    emit('enrolled');
+
     // Auto-dismiss after 10 seconds
     setTimeout(() => {
       if (successMsg.value) {
@@ -458,7 +444,7 @@ const submitEnrollment = async () => {
       }
     }, 10000);
 
-    // Reset form
+    // Reset basic fields
     form.student_id = '';
     form.full_name = '';
     form.email = '';
@@ -480,7 +466,7 @@ onMounted(() => {
 </script>
 
 <style scoped>
-/* 🆕 Slide down animation */
+/* Slide down animation */
 .slide-down-enter-active {
   transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -496,7 +482,7 @@ onMounted(() => {
   transform: translateY(-10px);
 }
 
-/* 🆕 Bounce-in animation for check icon */
+/* Bounce-in animation for check icon */
 @keyframes bounce-in {
   0% {
     transform: scale(0);

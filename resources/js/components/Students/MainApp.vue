@@ -1,53 +1,4 @@
 <template>
-  <div class="p-6">
-    <StudentsList
-      :students="students"
-      :loading="loading"
-      :user-role="userRole"
-      @refresh="fetchStudents"
-      @open-breakdown="handleBreakdown"
-      @open-payment="handlePayment"
-    />
-  </div>
-</template>
-
-<script setup>
-import { ref, onMounted } from 'vue';
-import axios from 'axios';
-import StudentsList from './Students/StudentsList.vue';
-
-const students = ref([]);
-const loading = ref(false);
-const userRole = ref('');
-
-const fetchStudents = async () => {
-  loading.value = true;
-  try {
-    const res = await axios.get('/students-json');
-    students.value = res.data;
-  } catch (err) {
-    console.error('Error fetching students:', err);
-  } finally {
-    loading.value = false;
-  }
-};
-
-const handleBreakdown = (student) => {
-  console.log('Open breakdown for:', student);
-  // TODO: Buksan ang fee breakdown modal
-};
-
-const handlePayment = (student) => {
-  console.log('Open payment for:', student);
-  // TODO: Buksan ang payment modal
-};
-
-onMounted(() => {
-  const el = document.getElementById('app');
-  userRole.value = el?.dataset?.userRole || '';
-  fetchStudents();
-});
-</script><template>
   <div class="min-h-screen bg-gray-100">
 
     <!-- TABS NAVIGATION -->
@@ -74,33 +25,40 @@ onMounted(() => {
 
     <div class="max-w-7xl mx-auto p-6">
 
-      <!-- DASHBOARD TAB — ✅ Idugang ang @navigate -->
+      <!-- DASHBOARD TAB -->
       <DashboardStats
         v-if="activeSection === 'dashboard'"
         :user-role="userRole"
-        @navigate="activeSection = $event"
+        @navigate="handleNavigate"
       />
 
+      <!-- ENROLL TAB -->
       <EnrollForm
         v-else-if="activeSection === 'enroll'"
         :user-role="userRole"
+        @enrolled="handleEnrollSuccess"
       />
 
+      <!-- STUDENTS TAB -->
       <StudentsList
         v-else-if="activeSection === 'students'"
         :students="students"
         :loading="loading"
         :user-role="userRole"
+        :initial-filter-status="initialStudentFilter"
         @refresh="fetchStudents"
         @open-breakdown="handleBreakdown"
         @open-payment="handlePayment"
+        @filter-applied="initialStudentFilter = ''"
       />
 
+      <!-- REPORTS TAB -->
       <ReportsPanel
         v-else-if="activeSection === 'reports'"
         :user-role="userRole"
       />
 
+      <!-- USERS TAB -->
       <UserManagement
         v-else-if="activeSection === 'users'"
         :user-role="userRole"
@@ -148,6 +106,9 @@ const activeSection = ref('dashboard');
 const selectedStudent = ref(null);
 const breakdownStudent = ref(null);
 
+// For auto-filter when clicking Pending card
+const initialStudentFilter = ref('');
+
 const allTabs = [
   { key: 'dashboard', label: 'Dashboard', icon: '📊', roles: ['superadmin', 'admin', 'accounting', 'encoder'] },
   { key: 'enroll', label: 'Enroll New Student', icon: '📝', roles: ['superadmin', 'admin', 'accounting', 'encoder'] },
@@ -166,6 +127,7 @@ const fetchStudents = async () => {
   try {
     const res = await axios.get('/students-json');
     students.value = res.data;
+    console.log('✅ Students loaded:', students.value.length);
   } catch (err) {
     console.error('❌ Error fetching students:', err);
   } finally {
@@ -173,6 +135,26 @@ const fetchStudents = async () => {
   }
 };
 
+// ✅ AUTO-REFRESH students list when new student enrolled
+const handleEnrollSuccess = () => {
+  console.log('🎉 New student enrolled — refreshing students list...');
+  fetchStudents();
+};
+
+// HANDLE NAVIGATION
+const handleNavigate = (section) => {
+  console.log('🧭 Navigate to:', section);
+
+  if (section === 'students-pending') {
+    activeSection.value = 'students';
+    initialStudentFilter.value = 'pending';
+    return;
+  }
+
+  activeSection.value = section;
+};
+
+// HANDLE BREAKDOWN
 const handleBreakdown = (student) => {
   console.log('📋 Open breakdown for:', student);
   breakdownStudent.value = student;
