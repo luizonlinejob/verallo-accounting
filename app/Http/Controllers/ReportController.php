@@ -7,12 +7,13 @@ use App\Models\Student;
 use App\Models\StudentFee;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Cache;
 use Carbon\Carbon;
 
 class ReportController extends Controller
 {
     /**
-     * 📊 Generate Report
+     * 📊 Generate Report (with caching)
      */
     public function generate(Request $request)
     {
@@ -26,176 +27,23 @@ class ReportController extends Controller
         try {
             $period = $request->period;
             $courseFilter = $request->course;
-            $now = Carbon::now();
 
-            // ===== DETERMINE DATE RANGE =====
-            switch ($period) {
-                case 'weekly':
-                    $from = $now->copy()->startOfWeek();
-                    $to = $now->copy()->endOfWeek();
-                    break;
-                case 'monthly':
-                    $from = $now->copy()->startOfMonth();
-                    $to = $now->copy()->endOfMonth();
-                    break;
-                case 'yearly':
-                    $from = $now->copy()->startOfYear();
-                    $to = $now->copy()->endOfYear();
-                    break;
-                case 'custom':
-                    if (!$request->from || !$request->to) {
-                        return response()->json([
-                            'success' => false,
-                            'message' => 'Custom period requires both "from" and "to" dates.',
-                        ], 422);
-                    }
-                    $from = Carbon::parse($request->from)->startOfDay();
-                    $to = Carbon::parse($request->to)->endOfDay();
-                    break;
-                default:
-                    $from = $now->copy()->startOfMonth();
-                    $to = $now->copy()->endOfMonth();
-            }
+            // ✅ Cache key based on request params
+            $cacheKey = 'report_' . md5(json_encode([
+                'period' => $period,
+                'course' => $courseFilter,
+                'from'   => $request->from,
+                'to'     => $request->to,
+            ]));
 
-            // ===== FILTER STUDENT IDs BY COURSE =====
-            $studentQuery = Student::query();
-            if ($courseFilter) {
-                $studentQuery->where('course', $courseFilter);
-            }
-            $studentIds = $studentQuery->pluck('id')->toArray();
-
-            // ===== SUMMARY =====
-            $approvedInRange = Payment::where('status', 'approved')
-                ->whereIn('student_id', $studentIds)
-                ->whereBetween('approved_at', [$from, $to])->get();
-            $pendingInRange = Payment::where('status', 'pending')
-                ->whereIn('student_id', $studentIds)
-                ->whereBetween('created_at', [$from, $to])->get();
-            $rejectedInRange = Payment::where('status', 'rejected')
-                ->whereIn('student_id', $studentIds)
-                ->whereBetween('rejected_at', [$from, $to])->get();
-
-            $summary = [
-                'total_collection' => (float) $approvedInRange->sum('amount_paid'),
-                'total_pending'    => (float) $pendingInRange->sum('amount_paid'),
-                'total_rejected'   => (float) $rejectedInRange->sum('amount_paid'),
-                'approved_count'   => $approvedInRange->count(),
-                'pending_count'    => $pendingInRange->count(),
-                'rejected_count'   => $rejectedInRange->count(),
-            ];
-
-            // ===== PER-COURSE BREAKDOWN =====
-            $perCourseData = $this->getPerCourseBreakdown($from, $to);
-
-            // ===== FEE CATEGORY BREAKDOWN =====
-            $feeCategoryData = $this->getFeeCategoryBreakdown($from, $to, $courseFilter);
-
-            // ===== AGING REPORT =====
-            $agingReport = $this->getAgingReport($courseFilter);
-
-            // ===== ENROLLMENT REALIZATION =====
-            $enrollmentRealization = $this->getEnrollmentRealization($from, $to, $courseFilter);
-
-            // ===== ACCOUNTING SUMMARY =====
-            $accountingSummary = $this->getAccountingSummary($courseFilter);
-
-            // ===== 🆕 STUDENT LIST (flat, filtered by course) =====
-            $studentList = $this->getStudentListPerCourse($courseFilter);
-
-            // ===== PAYMENT METHOD BREAKDOWN =====
-            $methodBreakdown = Payment::where('status', 'approved')
-                ->whereIn('student_id', $studentIds)
-                ->whereBetween('approved_at', [$from, $to])
-                ->select('payment_method', DB::raw('SUM(amount_paid) as total'), DB::raw('COUNT(*) as count'))
-                ->groupBy('payment_method')
-                ->get()
-                ->map(fn($row) => [
-                    'method' => $row->payment_method ?? 'cash',
-                    'total'  => (float) $row->total,
-                    'count'  => (int) $row->count,
-                ]);
-
-            // ===== TOP PAYING STUDENTS =====
-            $topStudents = Payment::where('status', 'approved')
-                ->whereIn('student_id', $studentIds)
-                ->whereBetween('approved_at', [$from, $to])
-                ->with('student')
-                ->get()
-                ->groupBy('student_id')
-                ->map(function ($payments) {
-                    $student = $payments->first()->student;
-                    return [
-                        'student_id'    => $student->student_id ?? 'N/A',
-                        'student_name'  => $student->full_name ?? 'Unknown',
-                        'course'        => $student->course ?? '',
-                        'year_level'    => $student->year_level ?? '',
-                        'total_paid'    => (float) $payments->sum('amount_paid'),
-                        'payment_count' => $payments->count(),
-                    ];
-                })
-                ->sortByDesc('total_paid')
-                ->take(10)
-                ->values();
-
-            // ===== ENCODER PERFORMANCE =====
-            $encoderPerformance = Payment::where('status', 'approved')
-                ->whereIn('student_id', $studentIds)
-                ->whereBetween('approved_at', [$from, $to])
-                ->with('encoder')
-                ->get()
-                ->groupBy('encoded_by')
-                ->map(function ($payments) {
-                    $encoder = $payments->first()->encoder;
-                    return [
-                        'encoder_name'  => $encoder->name ?? 'Unknown',
-                        'total_encoded' => (float) $payments->sum('amount_paid'),
-                        'count'         => $payments->count(),
-                    ];
-                })
-                ->sortByDesc('total_encoded')
-                ->values();
-
-            // ===== DETAILED TRANSACTIONS =====
-            $transactions = Payment::with(['student', 'encoder', 'approver'])
-                ->whereIn('student_id', $studentIds)
-                ->whereBetween('created_at', [$from, $to])
-                ->latest()
-                ->get()
-                ->map(fn($p) => [
-                    'id'               => $p->id,
-                    'or_number'        => $p->or_number,
-                    'student_id'       => $p->student->student_id ?? '',
-                    'student_name'     => $p->student->full_name ?? '',
-                    'course'           => $p->student->course ?? '',
-                    'amount'           => (float) $p->amount_paid,
-                    'payment_method'   => $p->payment_method ?? 'cash',
-                    'status'           => $p->status,
-                    'encoded_at'       => $p->created_at?->toIso8601String(),
-                    'approved_at'      => $p->approved_at?->toIso8601String(),
-                    'rejected_at'      => $p->rejected_at?->toIso8601String(),
-                    'encoder'          => $p->encoder->name ?? '',
-                    'approver'         => $p->approver->name ?? '',
-                    'remarks'          => $p->remarks,
-                    'rejection_reason' => $p->rejection_reason,
-                ]);
+            // ✅ Cache for 5 minutes (300 seconds)
+            $reportData = Cache::remember($cacheKey, 300, function () use ($period, $courseFilter, $request) {
+                return $this->buildReportData($period, $courseFilter, $request);
+            });
 
             return response()->json([
-                'success'                => true,
-                'period'                 => $period,
-                'course_filter'          => $courseFilter,
-                'from'                   => $from->toDateString(),
-                'to'                     => $to->toDateString(),
-                'summary'                => $summary,
-                'per_course'             => $perCourseData,
-                'fee_category'           => $feeCategoryData,
-                'aging_report'           => $agingReport,
-                'enrollment_realization' => $enrollmentRealization,
-                'accounting_summary'     => $accountingSummary,
-                'student_list'           => $studentList,
-                'method_breakdown'       => $methodBreakdown,
-                'top_students'           => $topStudents,
-                'encoder_performance'    => $encoderPerformance,
-                'transactions'           => $transactions,
+                'success' => true,
+                ...$reportData,
             ], 200);
 
         } catch (\Exception $e) {
@@ -207,33 +55,228 @@ class ReportController extends Controller
     }
 
     /**
-     * Per-Course Breakdown
+     * 🔧 Build report data (extracted for caching)
      */
-    private function getPerCourseBreakdown($from, $to)
+    private function buildReportData($period, $courseFilter, $request)
     {
-        $students = Student::all();
-        $grouped = $students->groupBy('course');
+        $now = Carbon::now();
+
+        // ===== DETERMINE DATE RANGE =====
+        switch ($period) {
+            case 'weekly':
+                $from = $now->copy()->startOfWeek();
+                $to = $now->copy()->endOfWeek();
+                break;
+            case 'monthly':
+                $from = $now->copy()->startOfMonth();
+                $to = $now->copy()->endOfMonth();
+                break;
+            case 'yearly':
+                $from = $now->copy()->startOfYear();
+                $to = $now->copy()->endOfYear();
+                break;
+            case 'custom':
+                $from = Carbon::parse($request->from)->startOfDay();
+                $to = Carbon::parse($request->to)->endOfDay();
+                break;
+            default:
+                $from = $now->copy()->startOfMonth();
+                $to = $now->copy()->endOfMonth();
+        }
+
+        // ✅ Load ALL students with fees + payments ONCE (avoid N+1)
+        $studentQuery = Student::with([
+            'fees:id,student_id,fee_name,amount',
+            'payments:id,student_id,amount_paid,status,created_at,approved_at,rejected_at,rejection_reason,payment_method,encoded_by,approved_by,or_number,remarks'
+        ]);
+
+        if ($courseFilter) {
+            $studentQuery->where('course', $courseFilter);
+        }
+
+        $allStudents = $studentQuery->get();
+        $studentIds = $allStudents->pluck('id')->toArray();
+
+        // ===== FILTER PAYMENTS IN RANGE =====
+        $approvedInRange = Payment::where('status', 'approved')
+            ->whereIn('student_id', $studentIds)
+            ->whereBetween('approved_at', [$from, $to])
+            ->get();
+        $pendingInRange = Payment::where('status', 'pending')
+            ->whereIn('student_id', $studentIds)
+            ->whereBetween('created_at', [$from, $to])
+            ->get();
+        $rejectedInRange = Payment::where('status', 'rejected')
+            ->whereIn('student_id', $studentIds)
+            ->whereBetween('rejected_at', [$from, $to])
+            ->get();
+
+        $summary = [
+            'total_collection' => (float) $approvedInRange->sum('amount_paid'),
+            'total_pending'    => (float) $pendingInRange->sum('amount_paid'),
+            'total_rejected'   => (float) $rejectedInRange->sum('amount_paid'),
+            'approved_count'   => $approvedInRange->count(),
+            'pending_count'    => $pendingInRange->count(),
+            'rejected_count'   => $rejectedInRange->count(),
+        ];
+
+        // ===== PER-COURSE BREAKDOWN (no N+1) =====
+        $perCourseData = $this->getPerCourseBreakdownFast($allStudents, $from, $to);
+
+        // ===== FEE CATEGORY BREAKDOWN =====
+        $feeCategoryData = $this->getFeeCategoryBreakdownFast($allStudents, $from, $to);
+
+        // ===== AGING REPORT =====
+        $agingReport = $this->getAgingReportFast($allStudents);
+
+        // ===== ENROLLMENT REALIZATION =====
+        $enrollmentRealization = $this->getEnrollmentRealizationFast($allStudents, $from, $to);
+
+        // ===== ACCOUNTING SUMMARY =====
+        $accountingSummary = $this->getAccountingSummaryFast($allStudents);
+
+        // ===== STUDENT LIST =====
+        $studentList = $this->getStudentListFast($allStudents);
+
+        // ===== PAYMENT METHOD BREAKDOWN =====
+        $methodBreakdown = Payment::where('status', 'approved')
+            ->whereIn('student_id', $studentIds)
+            ->whereBetween('approved_at', [$from, $to])
+            ->select('payment_method', DB::raw('SUM(amount_paid) as total'), DB::raw('COUNT(*) as count'))
+            ->groupBy('payment_method')
+            ->get()
+            ->map(fn($row) => [
+                'method' => $row->payment_method ?? 'cash',
+                'total'  => (float) $row->total,
+                'count'  => (int) $row->count,
+            ]);
+
+        // ===== TOP PAYING STUDENTS =====
+        $topStudents = Payment::where('status', 'approved')
+            ->whereIn('student_id', $studentIds)
+            ->whereBetween('approved_at', [$from, $to])
+            ->with('student:id,student_id,full_name,course,year_level')
+            ->get()
+            ->groupBy('student_id')
+            ->map(function ($payments) {
+                $student = $payments->first()->student;
+                return [
+                    'student_id'    => $student->student_id ?? 'N/A',
+                    'student_name'  => $student->full_name ?? 'Unknown',
+                    'course'        => $student->course ?? '',
+                    'year_level'    => $student->year_level ?? '',
+                    'total_paid'    => (float) $payments->sum('amount_paid'),
+                    'payment_count' => $payments->count(),
+                ];
+            })
+            ->sortByDesc('total_paid')
+            ->take(10)
+            ->values();
+
+        // ===== ENCODER PERFORMANCE =====
+        $encoderPerformance = Payment::where('status', 'approved')
+            ->whereIn('student_id', $studentIds)
+            ->whereBetween('approved_at', [$from, $to])
+            ->with('encoder:id,name')
+            ->get()
+            ->groupBy('encoded_by')
+            ->map(function ($payments) {
+                $encoder = $payments->first()->encoder;
+                return [
+                    'encoder_name'  => $encoder->name ?? 'Unknown',
+                    'total_encoded' => (float) $payments->sum('amount_paid'),
+                    'count'         => $payments->count(),
+                ];
+            })
+            ->sortByDesc('total_encoded')
+            ->values();
+
+        // ===== DETAILED TRANSACTIONS (limited to 500) =====
+        $transactions = Payment::with([
+                'student:id,student_id,full_name,course',
+                'encoder:id,name',
+                'approver:id,name'
+            ])
+            ->whereIn('student_id', $studentIds)
+            ->whereBetween('created_at', [$from, $to])
+            ->latest()
+            ->limit(500)
+            ->get()
+            ->map(fn($p) => [
+                'id'               => $p->id,
+                'or_number'        => $p->or_number,
+                'student_id'       => $p->student->student_id ?? '',
+                'student_name'     => $p->student->full_name ?? '',
+                'course'           => $p->student->course ?? '',
+                'amount'           => (float) $p->amount_paid,
+                'payment_method'   => $p->payment_method ?? 'cash',
+                'status'           => $p->status,
+                'encoded_at'       => $p->created_at?->toIso8601String(),
+                'approved_at'      => $p->approved_at?->toIso8601String(),
+                'rejected_at'      => $p->rejected_at?->toIso8601String(),
+                'encoder'          => $p->encoder->name ?? '',
+                'approver'         => $p->approver->name ?? '',
+                'remarks'          => $p->remarks,
+                'rejection_reason' => $p->rejection_reason,
+            ]);
+
+        return [
+            'period'                 => $period,
+            'course_filter'          => $courseFilter,
+            'from'                   => $from->toDateString(),
+            'to'                     => $to->toDateString(),
+            'summary'                => $summary,
+            'per_course'             => $perCourseData,
+            'fee_category'           => $feeCategoryData,
+            'aging_report'           => $agingReport,
+            'enrollment_realization' => $enrollmentRealization,
+            'accounting_summary'     => $accountingSummary,
+            'student_list'           => $studentList,
+            'method_breakdown'       => $methodBreakdown,
+            'top_students'           => $topStudents,
+            'encoder_performance'    => $encoderPerformance,
+            'transactions'           => $transactions,
+        ];
+    }
+
+    /**
+     * ⚡ FAST: Per-Course Breakdown (compute from loaded collections)
+     */
+    private function getPerCourseBreakdownFast($allStudents, $from, $to)
+    {
+        $grouped = $allStudents->groupBy('course');
         $result = [];
 
         foreach ($grouped as $course => $courseStudents) {
-            $studentIds = $courseStudents->pluck('id')->toArray();
+            $totalAssessment = 0;
+            $totalCollection = 0;
+            $collectionInRange = 0;
+            $pendingAmount = 0;
 
-            $totalAssessment = (float) StudentFee::whereIn('student_id', $studentIds)->sum('amount');
-            $collectionInRange = (float) Payment::whereIn('student_id', $studentIds)
-                ->where('status', 'approved')
-                ->whereBetween('approved_at', [$from, $to])
-                ->sum('amount_paid');
-            $totalCollection = (float) Payment::whereIn('student_id', $studentIds)
-                ->where('status', 'approved')
-                ->sum('amount_paid');
-            $pendingAmount = (float) Payment::whereIn('student_id', $studentIds)
-                ->where('status', 'pending')
-                ->sum('amount_paid');
+            foreach ($courseStudents as $student) {
+                // Assessment (from loaded fees)
+                $totalAssessment += $student->fees->sum('amount');
+
+                // Approved payments (from loaded payments)
+                $approvedPayments = $student->payments->where('status', 'approved');
+                $totalCollection += $approvedPayments->sum('amount_paid');
+
+                // Collection in range
+                $collectionInRange += $approvedPayments
+                    ->filter(fn($p) => $p->approved_at && $p->approved_at >= $from && $p->approved_at <= $to)
+                    ->sum('amount_paid');
+
+                // Pending
+                $pendingAmount += $student->payments
+                    ->where('status', 'pending')
+                    ->sum('amount_paid');
+            }
+
             $receivable = max(0, $totalAssessment - $totalCollection);
 
             $result[] = [
                 'course'               => $course,
-                'student_count'        => count($courseStudents),
+                'student_count'        => $courseStudents->count(),
                 'total_assessment'     => $totalAssessment,
                 'total_collection'     => $totalCollection,
                 'collection_in_range'  => $collectionInRange,
@@ -250,18 +293,10 @@ class ReportController extends Controller
     }
 
     /**
-     * Fee Category Breakdown
+     * ⚡ FAST: Fee Category Breakdown
      */
-    private function getFeeCategoryBreakdown($from, $to, $courseFilter = null)
+    private function getFeeCategoryBreakdownFast($allStudents, $from, $to)
     {
-        $studentQuery = Student::query();
-        if ($courseFilter) {
-            $studentQuery->where('course', $courseFilter);
-        }
-        $studentIds = $studentQuery->pluck('id')->toArray();
-
-        $fees = StudentFee::whereIn('student_id', $studentIds)->get();
-
         $categories = [
             'tuition' => ['label' => 'Tuition Fees', 'amount' => 0, 'collected' => 0, 'percent' => 0],
             'misc'    => ['label' => 'Miscellaneous Fees', 'amount' => 0, 'collected' => 0, 'percent' => 0],
@@ -269,26 +304,33 @@ class ReportController extends Controller
             'other'   => ['label' => 'Other Special Fees', 'amount' => 0, 'collected' => 0, 'percent' => 0],
         ];
 
-        foreach ($fees as $fee) {
-            $name = strtolower($fee->fee_name ?? '');
-            $amount = (float) $fee->amount;
+        foreach ($allStudents as $student) {
+            foreach ($student->fees as $fee) {
+                $name = strtolower($fee->fee_name ?? '');
+                $amount = (float) $fee->amount;
 
-            if (str_contains($name, 'tuition')) {
-                $categories['tuition']['amount'] += $amount;
-            } elseif (str_contains($name, 'lab')) {
-                $categories['lab']['amount'] += $amount;
-            } elseif (str_contains($name, 'misc') || str_contains($name, 'nstp') || str_contains($name, 'insurance') || str_contains($name, 'tts') || str_contains($name, 'entrance')) {
-                $categories['misc']['amount'] += $amount;
-            } else {
-                $categories['other']['amount'] += $amount;
+                if (str_contains($name, 'tuition')) {
+                    $categories['tuition']['amount'] += $amount;
+                } elseif (str_contains($name, 'lab')) {
+                    $categories['lab']['amount'] += $amount;
+                } elseif (str_contains($name, 'misc') || str_contains($name, 'nstp') || str_contains($name, 'insurance') || str_contains($name, 'tts') || str_contains($name, 'entrance')) {
+                    $categories['misc']['amount'] += $amount;
+                } else {
+                    $categories['other']['amount'] += $amount;
+                }
             }
         }
 
         $totalAssessment = array_sum(array_column($categories, 'amount'));
-        $totalCollected = (float) Payment::whereIn('student_id', $studentIds)
-            ->where('status', 'approved')
-            ->whereBetween('approved_at', [$from, $to])
-            ->sum('amount_paid');
+
+        // Total collected in range
+        $totalCollected = 0;
+        foreach ($allStudents as $student) {
+            $totalCollected += $student->payments
+                ->where('status', 'approved')
+                ->filter(fn($p) => $p->approved_at && $p->approved_at >= $from && $p->approved_at <= $to)
+                ->sum('amount_paid');
+        }
 
         foreach ($categories as &$cat) {
             $ratio = $totalAssessment > 0 ? ($cat['amount'] / $totalAssessment) : 0;
@@ -304,16 +346,10 @@ class ReportController extends Controller
     }
 
     /**
-     * Accounts Receivable Aging Report
+     * ⚡ FAST: Aging Report
      */
-    private function getAgingReport($courseFilter = null)
+    private function getAgingReportFast($allStudents)
     {
-        $studentQuery = Student::query();
-        if ($courseFilter) {
-            $studentQuery->where('course', $courseFilter);
-        }
-        $students = $studentQuery->get();
-
         $agingBuckets = [
             'current' => ['label' => 'Current (0-30 days)', 'amount' => 0, 'count' => 0],
             'days_30' => ['label' => '30-60 days', 'amount' => 0, 'count' => 0],
@@ -323,11 +359,9 @@ class ReportController extends Controller
 
         $now = Carbon::now();
 
-        foreach ($students as $student) {
-            $totalFees = (float) StudentFee::where('student_id', $student->id)->sum('amount');
-            $totalPaid = (float) Payment::where('student_id', $student->id)
-                ->where('status', 'approved')
-                ->sum('amount_paid');
+        foreach ($allStudents as $student) {
+            $totalFees = $student->fees->sum('amount');
+            $totalPaid = $student->payments->where('status', 'approved')->sum('amount_paid');
             $balance = $totalFees - $totalPaid;
 
             if ($balance <= 0) continue;
@@ -359,33 +393,30 @@ class ReportController extends Controller
     }
 
     /**
-     * Enrollment and Fee Realization Report
+     * ⚡ FAST: Enrollment Realization
      */
-    private function getEnrollmentRealization($from, $to, $courseFilter = null)
+    private function getEnrollmentRealizationFast($allStudents, $from, $to)
     {
-        $studentQuery = Student::query();
-        if ($courseFilter) {
-            $studentQuery->where('course', $courseFilter);
-        }
-        $students = $studentQuery->get();
-        $grouped = $students->groupBy('course');
-
+        $grouped = $allStudents->groupBy('course');
         $result = [];
 
         foreach ($grouped as $course => $courseStudents) {
-            $studentIds = $courseStudents->pluck('id')->toArray();
+            $expected = 0;
+            $actual = 0;
 
-            $expected = (float) StudentFee::whereIn('student_id', $studentIds)->sum('amount');
-            $actual = (float) Payment::whereIn('student_id', $studentIds)
-                ->where('status', 'approved')
-                ->whereBetween('approved_at', [$from, $to])
-                ->sum('amount_paid');
+            foreach ($courseStudents as $student) {
+                $expected += $student->fees->sum('amount');
+                $actual += $student->payments
+                    ->where('status', 'approved')
+                    ->filter(fn($p) => $p->approved_at && $p->approved_at >= $from && $p->approved_at <= $to)
+                    ->sum('amount_paid');
+            }
 
             $realizationRate = $expected > 0 ? round(($actual / $expected) * 100, 1) : 0;
 
             $result[] = [
                 'course'           => $course,
-                'student_count'    => count($courseStudents),
+                'student_count'    => $courseStudents->count(),
                 'expected'         => $expected,
                 'actual'           => $actual,
                 'variance'         => $expected - $actual,
@@ -398,25 +429,15 @@ class ReportController extends Controller
     }
 
     /**
-     * 🆕 Student List (flat — para sa Chairman)
+     * ⚡ FAST: Student List
      */
-    private function getStudentListPerCourse($courseFilter = null)
+    private function getStudentListFast($allStudents)
     {
-        $studentQuery = Student::query();
-        if ($courseFilter) {
-            $studentQuery->where('course', $courseFilter);
-        }
-        $students = $studentQuery->orderBy('course')->orderBy('full_name')->get();
-
         $rows = [];
 
-        foreach ($students as $student) {
-            $totalAssessment = (float) StudentFee::where('student_id', $student->id)->sum('amount');
-
-            $totalPaid = (float) Payment::where('student_id', $student->id)
-                ->where('status', 'approved')
-                ->sum('amount_paid');
-
+        foreach ($allStudents as $student) {
+            $totalAssessment = $student->fees->sum('amount');
+            $totalPaid = $student->payments->where('status', 'approved')->sum('amount_paid');
             $balance = max(0, $totalAssessment - $totalPaid);
 
             $rows[] = [
@@ -424,12 +445,17 @@ class ReportController extends Controller
                 'full_name'         => $student->full_name,
                 'course'            => $student->course,
                 'year_level'        => $student->year_level,
-                'total_assessment'  => $totalAssessment,
-                'total_receivables' => $balance,
-                'total_paid'        => $totalPaid,
-                'balance'           => $balance,
+                'total_assessment'  => (float) $totalAssessment,
+                'total_receivables' => (float) $balance,
+                'total_paid'        => (float) $totalPaid,
+                'balance'           => (float) $balance,
             ];
         }
+
+        // Sort by course then name
+        usort($rows, function ($a, $b) {
+            return strcmp($a['course'], $b['course']) ?: strcmp($a['full_name'], $b['full_name']);
+        });
 
         return [
             'students'         => $rows,
@@ -441,45 +467,38 @@ class ReportController extends Controller
     }
 
     /**
-     * Accounting Summary
+     * ⚡ FAST: Accounting Summary
      */
-    private function getAccountingSummary($courseFilter = null)
+    private function getAccountingSummaryFast($allStudents)
     {
-        $studentQuery = Student::query();
-        if ($courseFilter) {
-            $studentQuery->where('course', $courseFilter);
-        }
-        $students = $studentQuery->get();
-        $studentIds = $students->pluck('id')->toArray();
-
-        $totalAssessment = (float) StudentFee::whereIn('student_id', $studentIds)->sum('amount');
-        $totalCollection = (float) Payment::whereIn('student_id', $studentIds)
-            ->where('status', 'approved')
-            ->sum('amount_paid');
-        $totalPending = (float) Payment::whereIn('student_id', $studentIds)
-            ->where('status', 'pending')
-            ->sum('amount_paid');
-        $totalReceivable = max(0, $totalAssessment - $totalCollection);
-
+        $totalAssessment = 0;
+        $totalCollection = 0;
+        $totalPending = 0;
         $studentsWithBalance = 0;
         $fullyPaidStudents = 0;
 
-        foreach ($students as $student) {
-            $fees = StudentFee::where('student_id', $student->id)->sum('amount');
-            $paid = Payment::where('student_id', $student->id)
-                ->where('status', 'approved')
-                ->sum('amount_paid');
+        foreach ($allStudents as $student) {
+            $fees = $student->fees->sum('amount');
+            $paid = $student->payments->where('status', 'approved')->sum('amount_paid');
+            $pending = $student->payments->where('status', 'pending')->sum('amount_paid');
+
+            $totalAssessment += $fees;
+            $totalCollection += $paid;
+            $totalPending += $pending;
+
             $balance = $fees - $paid;
 
             if ($balance > 0) $studentsWithBalance++;
             elseif ($fees > 0 && $balance <= 0) $fullyPaidStudents++;
         }
 
+        $totalReceivable = max(0, $totalAssessment - $totalCollection);
+
         return [
-            'total_assessment'      => $totalAssessment,
-            'total_collection'      => $totalCollection,
-            'total_pending'         => $totalPending,
-            'total_receivable'      => $totalReceivable,
+            'total_assessment'      => (float) $totalAssessment,
+            'total_collection'      => (float) $totalCollection,
+            'total_pending'         => (float) $totalPending,
+            'total_receivable'      => (float) $totalReceivable,
             'collection_rate'       => $totalAssessment > 0
                 ? round(($totalCollection / $totalAssessment) * 100, 1)
                 : 0,
