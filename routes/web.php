@@ -20,7 +20,7 @@ Route::get('/', function () {
     return view('welcome');
 })->name('landing');
 
-// Login page (show form)
+// Login page
 Route::get('/login', function () {
     if (auth()->check()) {
         return redirect('/dashboard');
@@ -32,36 +32,43 @@ Route::get('/login', function () {
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/api/login', [AuthController::class, 'login']);
 
-// Logout
+// ✅ Logout — POST (secure, gikan sa Vue/Blade form)
 Route::post('/logout', [AuthController::class, 'logout'])->middleware('auth');
 Route::post('/api/logout', [AuthController::class, 'logout'])->middleware('auth');
+
+// ✅ Logout — GET fallback (para sa direct URL access)
+Route::get('/logout', function () {
+    auth()->logout();
+    request()->session()->invalidate();
+    request()->session()->regenerateToken();
+    return redirect('/');
+});
+
+Route::get('/api/logout', function () {
+    auth()->logout();
+    request()->session()->invalidate();
+    request()->session()->regenerateToken();
+    return redirect('/');
+});
 
 // ===== PROTECTED ROUTES =====
 
 Route::middleware(['auth'])->group(function () {
 
-    // ==========================================================================
-    // DASHBOARD
-    // ==========================================================================
+    // Dashboard
     Route::get('/dashboard', function () {
         return view('dashboard');
     })->name('dashboard');
 
-    // Dashboard Stats API
     Route::get('/dashboard/stats', [DashboardController::class, 'stats']);
     Route::get('/api/dashboard/stats', [DashboardController::class, 'stats']);
 
-    // ==========================================================================
     // Reports
-    // ==========================================================================
     Route::get('/reports/generate', [ReportController::class, 'generate']);
     Route::get('/api/reports/generate', [ReportController::class, 'generate']);
 
-    // ==========================================================================
-    // Student Enrollment & Management
-    // ==========================================================================
+    // Student Enrollment
     Route::controller(StudentEnrollmentController::class)->group(function () {
-
         Route::get('/enroll', 'index')->name('enroll.index');
         Route::get('/students', 'index')->name('students.index');
 
@@ -98,11 +105,8 @@ Route::middleware(['auth'])->group(function () {
         Route::delete('/api/custom-fields/{id}', 'removeCustomField');
     });
 
-    // ==========================================================================
-    // Payment Processing
-    // ==========================================================================
+    // Payments
     Route::controller(PaymentController::class)->group(function () {
-
         Route::post('/payments', 'store');
         Route::post('/api/payments', 'store');
 
@@ -131,28 +135,7 @@ Route::middleware(['auth'])->group(function () {
         Route::get('/api/students/{studentId}/payments', 'getStudentPaymentHistory');
     });
 
-    // ==========================================================================
     // Fees
-    // ==========================================================================
-    Route::put('/fees/{id}', [FeeController::class, 'update']);
-    Route::put('/api/fees/{id}', [FeeController::class, 'update']);
-
-    // ==========================================================================
-    // Users
-    // ==========================================================================
-    Route::get('/users', [UserController::class, 'index']);
-    Route::get('/api/users', [UserController::class, 'index']);
-    Route::post('/users', [UserController::class, 'store']);
-    Route::post('/api/users', [UserController::class, 'store']);
-    Route::put('/users/{user}/role', [UserController::class, 'updateRole']);
-    Route::put('/api/users/{user}/role', [UserController::class, 'updateRole']);
-    Route::delete('/users/{user}', [UserController::class, 'destroy']);
-    Route::delete('/api/users/{user}', [UserController::class, 'destroy']);
-
-
-    // ==========================================================================
-    // Fees
-    // ==========================================================================
     Route::get('/students/{studentId}/fees', [FeeController::class, 'getStudentFees']);
     Route::get('/api/students/{studentId}/fees', [FeeController::class, 'getStudentFees']);
 
@@ -165,9 +148,7 @@ Route::middleware(['auth'])->group(function () {
     Route::delete('/fees/{id}', [FeeController::class, 'destroy']);
     Route::delete('/api/fees/{id}', [FeeController::class, 'destroy']);
 
-    // ==========================================================================
-   // Users
-  // ==========================================================================
+    // Users
     Route::get('/users', [UserController::class, 'index']);
     Route::get('/api/users', [UserController::class, 'index']);
     Route::post('/users', [UserController::class, 'store']);
@@ -176,4 +157,14 @@ Route::middleware(['auth'])->group(function () {
     Route::put('/api/users/{user}/role', [UserController::class, 'updateRole']);
     Route::delete('/users/{user}', [UserController::class, 'destroy']);
     Route::delete('/api/users/{user}', [UserController::class, 'destroy']);
+
+    // Courses
+    Route::get('/courses', [CourseController::class, 'index']);
+    Route::get('/api/courses', [CourseController::class, 'index']);
+    Route::post('/courses', [CourseController::class, 'store']);
+    Route::post('/api/courses', [CourseController::class, 'store']);
+    Route::put('/courses/{id}', [CourseController::class, 'update']);
+    Route::put('/api/courses/{id}', [CourseController::class, 'update']);
+    Route::delete('/courses/{id}', [CourseController::class, 'destroy']);
+    Route::delete('/api/courses/{id}', [CourseController::class, 'destroy']);
 });
