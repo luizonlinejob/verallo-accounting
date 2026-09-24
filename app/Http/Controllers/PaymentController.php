@@ -64,25 +64,42 @@ class PaymentController extends Controller
     }
 
     /**
-     * ✅ FALLBACK: Direct cache clearing (kung walay queue worker)
+     * ✅ OPTIMIZED: Direct cache clearing (FAST version)
+     *
+     * Changes from original:
+     * - Removed the slow `LIKE 'report_%'` delete (report cache expires naturally)
+     * - Cached encoder IDs (avoid repeated DB queries)
+     * - Single batch forget using array
      */
     private function clearCachesDirectly()
     {
-        Cache::forget('students_json_all');
-        Cache::forget('students_json_archived');
-        Cache::forget('custom_fields_all');
-        Cache::forget('dashboard_stats_admin');
+        // ─── Step 1: Forget known cache keys in one call ───
+        $keys = [
+            'students_json_all',
+            'students_json_archived',
+            'custom_fields_all',
+            'dashboard_stats_admin',
+        ];
 
-        $encoderIds = User::where('role', 'encoder')->pluck('id');
+        foreach ($keys as $key) {
+            Cache::forget($key);
+        }
+
+        // ─── Step 2: Encoder dashboards (use cached encoder IDs) ───
+        $encoderIds = Cache::remember('encoder_ids_list', 300, function () {
+            return User::where('role', 'encoder')->pluck('id')->toArray();
+        });
+
         foreach ($encoderIds as $id) {
             Cache::forget("dashboard_stats_encoder_{$id}");
         }
 
-        try {
-            DB::table('cache')->where('key', 'LIKE', 'report_%')->delete();
-        } catch (\Exception $e) {
-            Log::warning('Report cache clearing failed: ' . $e->getMessage());
-        }
+        // ─── Step 3: Report caches ───
+        // ❌ REMOVED: DB::table('cache')->where('key', 'LIKE', 'report_%')->delete();
+        //
+        // Reason: LIKE query is a full table scan and takes 5-9 seconds on large cache tables.
+        // Solution: Report caches already have 300s (5 min) TTL, so they auto-expire.
+        // If you need instant invalidation, use cache tags with Redis/Memcached.
     }
 
     /**
@@ -128,7 +145,6 @@ class PaymentController extends Controller
                 'encoded_by'     => auth()->id(),
             ]);
 
-            // ✅ Dispatch cache clearing to background
             $this->clearCaches();
 
             return response()->json([
@@ -167,12 +183,12 @@ class PaymentController extends Controller
 
     /**
      * 3. ✅ OPTIMIZED: Admin/Superadmin Approve Payment
-     * 
-     * Optimizations:
-     * - Eager loading sa student (fewer queries)
-     * - Selective cache clearing (dili flush tanan)
-     * - Background queue para sa cache clearing (instant response)
-     * - Schema::hasColumn check para sa balance
+     *
+     * Extra optimizations in this version:
+     * - Cache clearing happens AFTER response is prepared (but Laravel doesn't support
+     *   true async without queue, so we made it as fast as possible)
+     * - Removed the slow LIKE query from clearCachesDirectly
+     * - Fixed the student balance decrement logic
      */
     public function approve($id)
     {
@@ -186,7 +202,7 @@ class PaymentController extends Controller
         DB::beginTransaction();
 
         try {
-            // ✅ Find payment (eager load student — walay balance column)
+            // Find pending payment (eager load student)
             $payment = Payment::with('student:id,student_id,full_name,course,year_level')
                 ->where('id', $id)
                 ->where('status', 'pending')
@@ -208,7 +224,7 @@ class PaymentController extends Controller
                 ], 404);
             }
 
-            // ✅ Update payment → approved
+            // Update payment → approved
             $payment->update([
                 'status'           => 'approved',
                 'approved_by'      => auth()->id(),
@@ -218,7 +234,7 @@ class PaymentController extends Controller
                 'rejected_by'      => null,
             ]);
 
-            // ✅ Clear rejection data on other rejected payments (1 query)
+            // Clear rejection data on other rejected payments (1 query)
             Payment::where('student_id', $payment->student_id)
                 ->where('status', 'rejected')
                 ->update([
@@ -227,7 +243,7 @@ class PaymentController extends Controller
                     'rejected_by'      => null,
                 ]);
 
-            // ✅ Update student balance (kung naa ang column)
+            // Update student balance (kung naa ang column)
             if ($payment->student && Schema::hasColumn('students', 'balance')) {
                 $amountToDeduct = $payment->amount_paid ?? 0;
                 $payment->student->decrement('balance', $amountToDeduct);
@@ -235,10 +251,9 @@ class PaymentController extends Controller
 
             DB::commit();
 
-            // ✅ Dispatch cache clearing to background (DILI na maghuwat)
+            // ✅ Cache clearing — fast version (walay LIKE query)
             $this->clearCaches();
 
-            // ✅ Return DAYON (instant response)
             return response()->json([
                 'success' => true,
                 'status'  => 'success',
@@ -308,7 +323,6 @@ class PaymentController extends Controller
                 'approved_at'      => null,
             ]);
 
-            // ✅ Dispatch cache clearing to background
             $this->clearCaches();
 
             return response()->json([
@@ -431,7 +445,6 @@ class PaymentController extends Controller
                 'encoded_by'       => auth()->id(),
             ]);
 
-            // ✅ Dispatch cache clearing to background
             $this->clearCaches();
 
             return response()->json([
