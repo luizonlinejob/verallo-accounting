@@ -10,6 +10,39 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ReportController;
 use App\Http\Controllers\CourseController;
 
+// ═══════════════════════════════════════════════════════════════
+// TEMPORARY ROUTE — Cache Clear for Render (No Shell Access)
+// ⚠️ DELETE THIS AFTER USE
+// ═══════════════════════════════════════════════════════════════
+Route::get('/clear-cache-2026', function () {
+    try {
+        \Artisan::call('optimize:clear');
+        \Artisan::call('cache:clear');
+        \Artisan::call('config:clear');
+        \Artisan::call('route:clear');
+        \Artisan::call('view:clear');
+
+        $controllerPath = app_path('Http/Controllers/PaymentController.php');
+        $content = file_exists($controllerPath) ? file_get_contents($controllerPath) : '';
+
+        return response()->json([
+            'success'          => true,
+            'message'          => 'All caches cleared successfully',
+            'git_commit'       => trim(shell_exec('git rev-parse --short HEAD') ?? 'unknown'),
+            'has_like_query'   => str_contains($content, "LIKE 'report_%'"),
+            'file_modified'    => file_exists($controllerPath) ? date('Y-m-d H:i:s', filemtime($controllerPath)) : 'N/A',
+            'queue_connection' => config('queue.default'),
+            'cache_driver'     => config('cache.default'),
+            'php_version'      => phpversion(),
+        ]);
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => $e->getMessage(),
+        ], 500);
+    }
+});
+
 // ===== PUBLIC ROUTES =====
 
 // Landing page
