@@ -16,29 +16,66 @@ use App\Http\Controllers\CourseController;
 // ═══════════════════════════════════════════════════════════════
 Route::get('/clear-cache-2026', function () {
     try {
+        $timings = [];
+
+        // Test 1 — DB connection speed
+        $start = microtime(true);
+        \DB::table('payments')->count();
+        $timings['db_count_ms'] = round((microtime(true) - $start) * 1000, 2);
+
+        // Test 2 — Simple query
+        $start = microtime(true);
+        \DB::table('payments')->where('status', 'pending')->count();
+        $timings['db_pending_count_ms'] = round((microtime(true) - $start) * 1000, 2);
+
+        // Test 3 — User query (kini kay naa sa clearCachesDirectly)
+        $start = microtime(true);
+        \App\Models\User::where('role', 'encoder')->pluck('id');
+        $timings['user_encoder_query_ms'] = round((microtime(true) - $start) * 1000, 2);
+
+        // Test 4 — Cache forget speed
+        $start = microtime(true);
+        \Cache::forget('test_key_xyz');
+        $timings['cache_forget_ms'] = round((microtime(true) - $start) * 1000, 2);
+
+        // Test 5 — Full clearCachesDirectly
+        $start = microtime(true);
+        $controller = app(\App\Http\Controllers\PaymentController::class);
+        $reflection = new \ReflectionClass($controller);
+        $method = $reflection->getMethod('clearCachesDirectly');
+        $method->setAccessible(true);
+        $method->invoke($controller);
+        $timings['clearCachesDirectly_ms'] = round((microtime(true) - $start) * 1000, 2);
+
+        // Test 6 — Full artisan optimize:clear
+        $start = microtime(true);
         \Artisan::call('optimize:clear');
-        \Artisan::call('cache:clear');
-        \Artisan::call('config:clear');
-        \Artisan::call('route:clear');
-        \Artisan::call('view:clear');
+        $timings['optimize_clear_ms'] = round((microtime(true) - $start) * 1000, 2);
 
         $controllerPath = app_path('Http/Controllers/PaymentController.php');
         $content = file_exists($controllerPath) ? file_get_contents($controllerPath) : '';
 
+        // ✅ Better check — excludes comments
+        $hasLikeQuery = (bool) preg_match(
+            '/^\s*DB::table\(.cache.\)->where\(.key., .LIKE., .report_%.\'\)->delete\(\);/m',
+            $content
+        );
+
         return response()->json([
             'success'          => true,
-            'message'          => 'All caches cleared successfully',
-            'git_commit'       => trim(shell_exec('git rev-parse --short HEAD') ?? 'unknown'),
-            'has_like_query'   => str_contains($content, "LIKE 'report_%'"),
-            'file_modified'    => file_exists($controllerPath) ? date('Y-m-d H:i:s', filemtime($controllerPath)) : 'N/A',
+            'message'          => 'Diagnostics complete',
+            'timings'          => $timings,
+            'has_like_query'   => $hasLikeQuery,
             'queue_connection' => config('queue.default'),
             'cache_driver'     => config('cache.default'),
             'php_version'      => phpversion(),
+            'db_host'          => config('database.connections.mysql.host'),
         ]);
     } catch (\Exception $e) {
         return response()->json([
             'success' => false,
             'message' => $e->getMessage(),
+            'trace'   => $e->getTraceAsString(),
         ], 500);
     }
 });
